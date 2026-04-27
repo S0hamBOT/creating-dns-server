@@ -1,26 +1,64 @@
-## VMware Network Setup
-
-- **Adapter 1 (ens33)** → Host-only (VMnet1)  
-    → Used for lab communication  
-    → Subnet: `192.168.100.0/24`
-    
-- **Adapter 2 (ens37)** → NAT (VMnet8)  
-    → Used for internet access
-    
+# Pentesting Lab — Network & DNS Server Setup Guide
+> **Platform:** VMware Workstation | **Domain:** `sohamjadhav.in` | **Subnet:** `192.168.1.0/24`
 
 ---
 
-## Netplan Configuration File
+## Lab Architecture
 
-Path:
-
-```bash
-/etc/netplan/01-netcfg.yaml
+```
+┌─────────────────────────────────────────────────────┐
+│              Isolated Host-Only Network              │
+│                  192.168.1.0/24                    │
+│                                                      │
+│  ┌───────────────┐        ┌───────────────────────┐  │
+│  │  DNS Server   │        │       DVWA VM         │  │
+│  │192.168.1.10 │        │   192.168.1.20      │  │
+│  │   (BIND9)     │        │   (to be set up)      │  │
+│  └───────────────┘        └───────────────────────┘  │
+│                                                      │
+│  ┌───────────────┐                                   │
+│  │ Scanner/Kali  │                                   │
+│  │192.168.1.X  │                                   │
+│  └───────────────┘                                   │
+└─────────────────────────────────────────────────────┘
+         │
+         │ ens37 (NAT / VMnet8)
+         ▼
+    Internet (8.8.8.8)
 ```
 
+### IP Plan
+
+| Machine | IP Address |
+|---|---|
+| DNS Server | 192.168.1.10 |
+| DVWA Server | 192.168.1.20 |
+| Kali / Scanner | 192.168.1.X |
+
 ---
 
-## Final Configuration
+## Part 1 — VMware Network Adapter Setup
+
+Configure **two network adapters** on the DNS Server VM in VMware settings:
+
+| Adapter | VMware Network | Purpose | Subnet |
+|---|---|---|---|
+| Adapter 1 (`ens33`) | Host-only (VMnet1) | Lab communication | `192.168.1.0/24` |
+| Adapter 2 (`ens37`) | NAT (VMnet8) | Internet access | DHCP from VMware |
+
+> **How to set this in VMware:**
+> VM Settings → Add → Network Adapter → select Host-only or NAT accordingly
+
+---
+
+## Part 2 — DNS Server Network Configuration (Netplan)
+
+### 2.1 Configuration File
+
+Path: `/etc/netplan/50-cloud-init.yaml`
+
+> **Note:** On Ubuntu 24.04 the active file may be `50-cloud-init.yaml` instead of `01-netcfg.yaml`.
+> Check with `ls /etc/netplan/` and edit whichever file exists.
 
 ```yaml
 network:
@@ -28,145 +66,92 @@ network:
   renderer: networkd
 
   ethernets:
-    ens33:  # Host-only (Lab Network)
+    ens33:  # Host-only — Lab Network
       dhcp4: no
       addresses:
-        - 192.168.100.10/24
+        - 192.168.1.10/24
       nameservers:
         addresses:
           - 127.0.0.1   # Local BIND9 DNS
 
-    ens37:  # NAT (Internet Access)
+    ens37:  # NAT — Internet Access
       dhcp4: yes
 ```
 
----
-
-## Apply Configuration
+### 2.2 Apply and Verify
 
 ```bash
 sudo netplan apply
 ```
 
----
-
-## Verify Network
-
 ```bash
-ip a
-ip route
+ip a        # Check assigned IPs
+ip route    # Check routing table
 ```
 
-### Expected:
+Expected results:
+- `ens33` → `192.168.1.10`
+- `ens37` → `192.168.x.x` (assigned by VMware DHCP)
+- Default route via `ens37`
 
-- `ens33 → 192.168.100.10`
-    
-- `ens37 → 192.168.xxx.xxx` (from NAT)
-    
-
----
-
-## Test Connectivity
+### 2.3 Test Connectivity
 
 ```bash
-# Internet (should work via NAT)
-ping 8.8.8.8
+# Internet via NAT
+ping -c 3 8.8.8.8
 
 # DNS resolution via BIND9
-ping google.com
+ping -c 3 google.com
 ```
 
----
+### 2.4 Important Rules
 
-## Important Notes
-
-- ❌ **Do NOT set gateway on ens33 (host-only)**
-    
-- ✅ Default route must come from **ens37 (NAT)**
-    
-- ✅ DNS points to `127.0.0.1` (your BIND server)
-    
-- ✅ BIND should forward external queries to:
-    
-    ```
-    8.8.8.8
-    8.8.4.4
-    ```
-    
-
----
-
-## Lab IP Plan
-
-|Machine|IP Address|
+| Rule | Detail |
 |---|---|
-|DNS Server|192.168.100.10|
-|DVWA Server|192.168.100.20|
-|Kali Linux|192.168.100.X|
+| ❌ No gateway on `ens33` | Host-only must NOT have a default route |
+| ✅ Default route via `ens37` | NAT adapter provides internet via DHCP |
+| ✅ DNS → `127.0.0.1` | BIND9 runs locally on this VM |
+| ✅ Forward external queries | BIND9 forwards to `8.8.8.8` / `8.8.4.4` |
 
 ---
 
-## Final Architecture
+## Part 3 — BIND9 DNS Server Installation
 
-- Host-only → isolated pentesting lab
-    
-- NAT → safe internet access
-    
-- DNS server → resolves:
-    
-    - Internal domains (`dvwa.sohamjadhav.in`)
-        
-    - External domains (`google.com`)
-        
-
----
-
-# Setting Up a Local DNS Server for Your Pentesting Lab
-
-Here's how to set up a **BIND9 DNS server** on a dedicated VM that you can reuse for any future lab application.
-
----
-
-## Phase 1: DNS Server VM Setup
-
-### 1.1 — Install BIND9
+### 3.1 Install BIND9
 
 ```bash
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y bind9 bind9utils bind9-doc dnsutils net-tools
 ```
 
-### 1.2 — Get Your VM's IP (note this down)
+### 3.2 Confirm Your VM's IP
 
 ```bash
 ip -4 addr show | grep inet
-# Example output: inet 192.168.100.10/24
-# Your DNS Server IP = 192.168.100.10
+# Look for ens33 — should show 192.168.1.10/24
 ```
 
 ---
 
-## Phase 2: Configure BIND9
+## Part 4 — Configure BIND9
 
-### 2.1 — Edit the main named.conf.options
+### 4.1 Edit named.conf.options
 
 ```bash
 sudo nano /etc/bind/named.conf.options
 ```
 
-Paste this entire block:
-
-```bash
+```
 options {
     directory "/var/cache/bind";
 
-    # Allow queries from your lab network only
-    allow-query { 
-        localhost; 
-        192.168.100.0/24;   # Change to match YOUR subnet
+    # Allow queries from lab network only
+    allow-query {
+        localhost;
+        192.168.1.0/24;
     };
 
-    # Forward unknown queries to upstream DNS (Google)
+    # Forward unknown queries to Google DNS
     forwarders {
         8.8.8.8;
         8.8.4.4;
@@ -174,25 +159,25 @@ options {
 
     forward only;
 
-    # Security hardening
+    # Security
     dnssec-validation auto;
     listen-on { any; };
     listen-on-v6 { none; };
     recursion yes;
-    allow-recursion { 
-        localhost; 
-        192.168.100.0/24;   # Same subnet as above
+    allow-recursion {
+        localhost;
+        192.168.1.0/24;
     };
 };
 ```
 
-### 2.2 — Declare your zone in named.conf.local
+### 4.2 Declare Zones in named.conf.local
 
 ```bash
 sudo nano /etc/bind/named.conf.local
 ```
 
-```bash
+```
 # Forward Zone — resolves hostnames to IPs
 zone "sohamjadhav.in" {
     type master;
@@ -200,25 +185,26 @@ zone "sohamjadhav.in" {
 };
 
 # Reverse Zone — resolves IPs back to hostnames
-zone "100.168.192.in-addr.arpa" {
+zone "1.168.192.in-addr.arpa" {
     type master;
-    file "/etc/bind/zones/db.192.168.100";
+    file "/etc/bind/zones/db.192.168.1";
 };
 ```
 
-> ⚠️ The reverse zone name is your subnet **written backwards**. For `192.168.100.x` it becomes `100.168.192.in-addr.arpa`
+> **How reverse zone names work:**
+> Subnet `192.168.1.x` written backwards → `1.168.192.in-addr.arpa`
 
 ---
 
-## Phase 3: Create Zone Files
+## Part 5 — Create Zone Files
 
-### 3.1 — Create the zones directory
+### 5.1 Create Zones Directory
 
 ```bash
 sudo mkdir -p /etc/bind/zones
 ```
 
-### 3.2 — Forward zone file
+### 5.2 Forward Zone File
 
 ```bash
 sudo nano /etc/bind/zones/db.sohamjadhav.in
@@ -227,7 +213,7 @@ sudo nano /etc/bind/zones/db.sohamjadhav.in
 ```dns
 $TTL    604800
 @       IN      SOA     ns1.sohamjadhav.in. admin.sohamjadhav.in. (
-                        2024010101      ; Serial  <-- increment this when you make changes
+                        2024010101      ; Serial — increment on every change
                         3600            ; Refresh
                         1800            ; Retry
                         604800          ; Expire
@@ -236,20 +222,20 @@ $TTL    604800
 ; Name Servers
 @       IN      NS      ns1.sohamjadhav.in.
 
-; A Records — NS itself
-ns1     IN      A       192.168.100.10   ; DNS Server's own IP
+; DNS Server itself
+ns1     IN      A       192.168.1.10
 
-; ── Add your lab apps below this line ──────────────────
-dvwa    IN      A       192.168.100.20   ; DVWA VM IP (to be set up later)
-; juice   IN     A       192.168.100.21   ; Example: future app
-; bwapp   IN     A       192.168.100.22   ; Example: future app
-; ────────────────────────────────────────────────────────
+; ── Lab Apps — add new entries below ──────────────────
+dvwa    IN      A       192.168.1.20
+; juice  IN      A       192.168.1.21   ← future app example
+; bwapp  IN      A       192.168.1.22   ← future app example
+; ──────────────────────────────────────────────────────
 ```
 
-### 3.3 — Reverse zone file
+### 5.3 Reverse Zone File
 
 ```bash
-sudo nano /etc/bind/zones/db.192.168.100
+sudo nano /etc/bind/zones/db.192.168.1
 ```
 
 ```dns
@@ -264,39 +250,43 @@ $TTL    604800
 ; Name Servers
 @       IN      NS      ns1.sohamjadhav.in.
 
-; PTR Records — last octet only
-10      IN      PTR     ns1.sohamjadhav.in.    ; DNS server itself
-20      IN      PTR     dvwa.sohamjadhav.in.   ; DVWA VM
+; PTR Records — last octet of IP only
+10      IN      PTR     ns1.sohamjadhav.in.
+20      IN      PTR     dvwa.sohamjadhav.in.
 ```
 
 ---
 
-## Phase 4: Validate and Start BIND9
+## Part 6 — Validate and Start BIND9
 
-### 4.1 — Check config syntax (must show no errors)
+### 6.1 Check Config Syntax
 
 ```bash
 sudo named-checkconf
 sudo named-checkzone sohamjadhav.in /etc/bind/zones/db.sohamjadhav.in
-sudo named-checkzone 100.168.192.in-addr.arpa /etc/bind/zones/db.192.168.100
+sudo named-checkzone 1.168.192.in-addr.arpa /etc/bind/zones/db.192.168.1
 ```
 
-Expected output for zone checks:
-
+Expected output:
 ```
 zone sohamjadhav.in/IN: loaded serial 2024010101
 OK
 ```
 
-### 4.2 — Start and enable BIND9
+Both zone checks must return `OK` before proceeding.
+
+### 6.2 Start and Enable BIND9
 
 ```bash
-sudo systemctl restart bind9
-sudo systemctl enable bind9
-sudo systemctl status bind9
+sudo systemctl restart named
+sudo systemctl enable named
+sudo systemctl status named
 ```
 
-### 4.3 — Open firewall port for DNS
+> **Note:** On Ubuntu 24.04, the service is called `named` not `bind9`.
+> `bind9` is an alias — use `named` to avoid the "refusing to operate on alias" warning.
+
+### 6.3 Open Firewall for DNS
 
 ```bash
 sudo ufw allow 53/tcp
@@ -307,74 +297,98 @@ sudo ufw status
 
 ---
 
-## Phase 5: Test the DNS Server
+## Part 7 — Test DNS Resolution
 
-Run these from the **DNS server itself** first:
+Run all tests from the DNS server itself first:
 
 ```bash
-# Test forward resolution
+# Forward resolution — hostname to IP
 dig @127.0.0.1 dvwa.sohamjadhav.in
 
-# Test reverse resolution
-dig @127.0.0.1 -x 192.168.100.20
+# Reverse resolution — IP to hostname
+dig @127.0.0.1 -x 192.168.1.20
 
-# Quick nslookup test
+# Quick test
 nslookup dvwa.sohamjadhav.in 127.0.0.1
 ```
 
-Expected output from `dig`:
-
+Expected `dig` output:
 ```
 ;; ANSWER SECTION:
-dvwa.sohamjadhav.in.  604800  IN  A  192.168.100.20
+dvwa.sohamjadhav.in.  604800  IN  A  192.168.1.20
 ```
 
 ---
 
-## Phase 6: How to Add Any New App Later
+## Part 8 — Adding Future Lab Apps
 
-When you spin up a new VM (e.g., Juice Shop at `192.168.100.21`), you only need to do **2 things**:
+When you spin up any new VM, only 3 steps needed on the DNS server:
 
-**Step 1** — Add to forward zone (`db.sohamjadhav.in`):
-
+**Step 1 — Forward zone** (`/etc/bind/zones/db.sohamjadhav.in`):
 ```dns
-juice   IN      A       192.168.100.21
+juice   IN      A       192.168.1.21
 ```
 
-**Step 2** — Add to reverse zone (`db.192.168.100`):
-
+**Step 2 — Reverse zone** (`/etc/bind/zones/db.192.168.1`):
 ```dns
 21      IN      PTR     juice.sohamjadhav.in.
 ```
 
-**Step 3** — Bump the serial and reload:
-
+**Step 3 — Increment serial in both files, then reload:**
 ```bash
-# Increment the serial number in BOTH zone files first, then:
-sudo named-checkconf && sudo systemctl reload bind9
+# Edit both zone files and bump serial e.g. 2024010101 → 2024010102
+sudo named-checkconf && sudo systemctl reload named
 ```
 
 ---
 
-## Network Topology So Far
+## Troubleshooting Reference
 
+### BIND9 won't start
+```bash
+sudo named-checkconf                  # check config syntax
+sudo journalctl -u named --no-pager   # check service logs
 ```
-┌─────────────────────────────────────────────┐
-│           Isolated Host-Only Network         │
-│              192.168.100.0/24                │
-│                                              │
-│  ┌──────────────┐      ┌──────────────────┐  │
-│  │  DNS Server  │      │   DVWA VM        │  │
-│  │ 192.168.100.10│      │ 192.168.100.20   │  │
-│  │  (BIND9)     │      │ (to be set up)   │  │
-│  └──────────────┘      └──────────────────┘  │
-│                                              │
-│  ┌──────────────┐                            │
-│  │ Scanner/Kali │                            │
-│  │ 192.168.100.X│                            │
-│  └──────────────┘                            │
-└─────────────────────────────────────────────┘
+
+### DNS not resolving
+```bash
+dig @127.0.0.1 dvwa.sohamjadhav.in   # test locally first
+sudo named-checkzone sohamjadhav.in /etc/bind/zones/db.sohamjadhav.in
+```
+
+### No internet on VM (ens37 has no IP)
+```bash
+ip route show                   # check for default route
+sudo networkctl status ens37    # check DHCP state
+sudo networkctl up ens37
+sudo networkctl renew ens37
+```
+
+### sudo warning: "unable to resolve host"
+```bash
+echo "127.0.0.1 $(hostname)" | sudo tee -a /etc/hosts
+```
+
+### Cloud-init overwriting netplan on reboot
+```bash
+sudo bash -c 'echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network.cfg'
 ```
 
 ---
 
+## Final Verification Checklist
+
+```
+[ ] ens33 has IP 192.168.1.10
+[ ] ens37 has IP from DHCP (NAT)
+[ ] Default route is via ens37
+[ ] ping 8.8.8.8 works
+[ ] named service is active and enabled
+[ ] named-checkconf returns no errors
+[ ] dig @127.0.0.1 dvwa.sohamjadhav.in returns 192.168.1.20
+[ ] Port 53 open (ufw or firewall inactive)
+```
+
+---
+
+*This DNS server is reusable — spin up any new lab VM, add one DNS record, reload BIND9, and the domain resolves instantly across your entire lab network.*
